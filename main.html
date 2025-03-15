@@ -2,11 +2,15 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <title>House AI</title>
 </head>
 <body>
 <style>
     body {
         background-color: black;
+        margin: 0;
+        padding: 0;
+        font-family: Arial, sans-serif;
     }
 
     .img-container {
@@ -49,6 +53,7 @@
         top: 0;
         margin-bottom: 0;
         background-color: #2d2d2d;
+        z-index: 100;
     }
 
     .bottom {
@@ -59,11 +64,12 @@
         padding: 25px;
         width: 100%;
         background-color: #2d2d2d;
+        z-index: 100;
     }
 
     .top p, .bottom p {
         display: unset;
-        font-family: "Minecraft";
+        font-family: "Minecraft", monospace;
         text-shadow: 3px 3px black;
         max-width: 850px;
         white-space: nowrap;
@@ -88,8 +94,8 @@
 </div>
 
 <div class="img-container">
-    <img id="house" src="static/house.png">
-    <img id="wilson" src="static/wilson.png">
+    <img id="house" src="static/house.png" alt="House">
+    <img id="wilson" src="static/wilson.png" alt="Wilson">
 </div>
 
 <div class="subtitle-container">
@@ -104,20 +110,25 @@
 
 <script src="static/dialogue.js"></script>
 <script>
-    async function updateGeneratedTopic(topic) {
-        document.getElementById('generatedTopic').textContent = topic;
+    // Poll for state updates every second
+    function pollState() {
+        fetch('http://127.0.0.1:1204/get_state')
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('currentTopic').textContent = data.currentTopic;
+                document.getElementById('generatedTopic').textContent = data.generatedTopic;
+            })
+            .catch(error => console.error('Error polling state:', error));
     }
 
-    async function moveToCurrentTopic() {
-        const generatedTopic = document.getElementById('generatedTopic').textContent;
-        document.getElementById('currentTopic').textContent = generatedTopic;
-        document.getElementById('generatedTopic').textContent = '';
-    }
+    // Start polling
+    setInterval(pollState, 1000);
 
     async function notifyPythonScript() {
         try {
             const response = await fetch('http://127.0.0.1:1204/playback_finished', {
-                method: 'POST'
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'}
             });
             const result = await response.json();
             console.log('Playback finished:', result);
@@ -140,8 +151,12 @@
         }
     }
 
+    // Check if dialogue array exists and is not empty
+    if (typeof dialogue !== 'undefined' && dialogue.length > 0) {
+        playDialogue();
+    }
+
     async function playDialogue() {
-        await moveToCurrentTopic();
         for (const line of dialogue) {
             const audio = new Audio(`voices/output/${line.character.toLowerCase()}_${line.position}.wav`);
             document.getElementById('name').textContent = line.character + ":";
@@ -160,13 +175,17 @@
                     deleteAudio(file);
                     resolve();
                 };
-                audio.play();
+                audio.play().catch(error => {
+                    console.error('Error playing audio:', error);
+                    resolve(); // Continue even if there's an error
+                });
             });
         }
         await notifyPythonScript();
-    }
 
-    playDialogue();
+        // Reload the page to get new dialogue after playback
+        location.reload();
+    }
 </script>
 
 </body>
