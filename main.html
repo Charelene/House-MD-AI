@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+</head>
+<body>
+<style>
+    body {
+        background-color: black;
+    }
+
+    .img-container {
+        display: flex;
+        justify-content: space-between;
+    }
+
+    #house, #wilson {
+        opacity: 0;
+        width: 500px;
+        margin: 100px;
+        padding-top: 100px;
+        transition: opacity 0.5s ease;
+    }
+
+    p {
+        display: inline;
+        font-size: 24px;
+        color: white;
+        font-family: "Freckle Face", serif;
+    }
+
+    .subtitle-container p {
+        font-size: 48px;
+        margin-left: 25px;
+    }
+
+    .subtitle-container {
+        margin-left: 100px;
+        margin-right: 100px;
+        max-height: 350px;
+    }
+
+    .top {
+        display: flex;
+        width: 100%;
+        padding: 25px;
+        position: fixed;
+        left: 0;
+        top: 0;
+        margin-bottom: 0;
+        background-color: #2d2d2d;
+    }
+
+    .bottom {
+        display: flex;
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        padding: 25px;
+        width: 100%;
+        background-color: #2d2d2d;
+    }
+
+    .top p, .bottom p {
+        display: unset;
+        font-family: "Minecraft";
+        text-shadow: 3px 3px black;
+        max-width: 850px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-top: 0;
+        margin-bottom: 0;
+    }
+
+    #currentTopic, #generatedTopic {
+        margin-left: 10px;
+        color: yellow;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+</style>
+
+<div class="top">
+    <p>Now generating: </p>
+    <p class="topic" id="generatedTopic"></p>
+</div>
+
+<div class="img-container">
+    <img id="house" src="static/house.png">
+    <img id="wilson" src="static/wilson.png">
+</div>
+
+<div class="subtitle-container">
+    <b><p class="name" id="name"></p></b>
+    <p class="text" id="subtitle"></p>
+</div>
+
+<div class="bottom">
+    <p>Current topic: </p>
+    <p class="topic" id="currentTopic"></p>
+</div>
+
+<script src="static/dialogue.js"></script>
+<script>
+    async function updateGeneratedTopic(topic) {
+        document.getElementById('generatedTopic').textContent = topic;
+    }
+
+    async function moveToCurrentTopic() {
+        const generatedTopic = document.getElementById('generatedTopic').textContent;
+        document.getElementById('currentTopic').textContent = generatedTopic;
+        document.getElementById('generatedTopic').textContent = '';
+    }
+
+    async function notifyPythonScript() {
+        try {
+            const response = await fetch('http://127.0.0.1:1204/playback_finished', {
+                method: 'POST'
+            });
+            const result = await response.json();
+            console.log('Playback finished:', result);
+        } catch (error) {
+            console.error('Error notifying Python:', error);
+        }
+    }
+
+    async function deleteAudio(file) {
+        try {
+            const response = await fetch('http://127.0.0.1:1204/delete_audio', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({file: file})
+            });
+            const result = await response.json();
+            console.log('Delete response:', result);
+        } catch (error) {
+            console.error('Error deleting audio:', error);
+        }
+    }
+
+    async function playDialogue() {
+        await moveToCurrentTopic();
+        for (const line of dialogue) {
+            const audio = new Audio(`voices/output/${line.character.toLowerCase()}_${line.position}.wav`);
+            document.getElementById('name').textContent = line.character + ":";
+            document.getElementById('subtitle').textContent = line.voice_line;
+
+            document.getElementById('house').style.opacity = line.character === 'HOUSE' ? '1' : '0';
+            document.getElementById('wilson').style.opacity = line.character === 'WILSON' ? '1' : '0';
+
+            await new Promise(resolve => {
+                audio.onended = () => {
+                    document.getElementById('name').textContent = '';
+                    document.getElementById('subtitle').textContent = '';
+                    document.getElementById('house').style.opacity = '0';
+                    document.getElementById('wilson').style.opacity = '0';
+                    var file = "voices/output/" + line.character.toLowerCase() + "_" + line.position + ".wav";
+                    deleteAudio(file);
+                    resolve();
+                };
+                audio.play();
+            });
+        }
+        await notifyPythonScript();
+    }
+
+    playDialogue();
+</script>
+
+</body>
+</html>
