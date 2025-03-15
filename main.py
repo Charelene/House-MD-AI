@@ -1,4 +1,4 @@
-import requests, os, asyncio, re, torch, json, sqlite3, random, ssl
+import requests, os, asyncio, re, torch, json, sqlite3, random, ssl, time
 from ollama import AsyncClient
 from TTS.api import TTS
 from dotenv import load_dotenv
@@ -30,6 +30,17 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+
+def cleanup_queue():
+    """Reset all in-progress items and clean up the queue if needed"""
+    conn = sqlite3.connect('queue.db')
+    cursor = conn.cursor()
+    # Reset any items marked as in_progress
+    cursor.execute('UPDATE queue SET in_progress = 0 WHERE in_progress = 1')
+    conn.commit()
+    conn.close()
+    print("Queue cleaned up - all in-progress items reset")
 
 
 async def add_to_queue(prompt, user_requested=False):
@@ -126,7 +137,8 @@ async def generate_tts_audio(batch):
         os.makedirs("voices/output", exist_ok=True)
 
         for item in batch:
-            speaker_wav = "voices/input/haus.wav" if item["character"] == "HOUSE" else "voices/input/wilson.wav"
+            # Fix the filename typo (from "haus.wav" to "house.wav")
+            speaker_wav = "voices/input/house.wav" if item["character"] == "HOUSE" else "voices/input/wilson.wav"
             output_file = f"voices/output/{item['character'].lower()}_{item['position']}.wav"
 
             # Ensure the input voice file exists
@@ -135,6 +147,7 @@ async def generate_tts_audio(batch):
                 continue
 
             tts.tts_to_file(text=item["voice_line"], speaker_wav=speaker_wav, language="en", file_path=output_file)
+            print(f"Generated audio file: {output_file}")
 
         print("TTS generation complete.")
     except Exception as e:
@@ -163,6 +176,24 @@ def update_webpage_state(generated_topic=None, current_topic=None):
         print(f"Error updating web interface state: {e}")
 
 
+def cleanup_old_audio_files():
+    """Clean up audio files that are older than 1 hour"""
+    output_dir = "voices/output"
+    if not os.path.exists(output_dir):
+        return
+
+    for filename in os.listdir(output_dir):
+        file_path = os.path.join(output_dir, filename)
+        if os.path.isfile(file_path):
+            # Remove files older than 1 hour
+            if time.time() - os.path.getmtime(file_path) > 3600:
+                try:
+                    os.remove(file_path)
+                    print(f"Cleaned up old file: {file_path}")
+                except Exception as e:
+                    print(f"Error deleting old file {file_path}: {e}")
+
+
 class TwitchBot(commands.Bot):
     def __init__(self):
         # Fix environment variable names
@@ -185,10 +216,14 @@ class TwitchBot(commands.Bot):
             initial_channels=[channel],
             ssl_context=ssl_context
         )
-        self.queue_processor_task = None
+        # Initialize with a dummy task to prevent NoneType errors
+        self.queue_processor_task = asyncio.create_task(asyncio.sleep(0))
 
     async def event_ready(self):
         print(f'Logged in as {self.nick}')
+        # Cancel previous task if it exists
+        if self.queue_processor_task:
+            self.queue_processor_task.cancel()
         # Start the queue processor when the bot is ready
         self.queue_processor_task = asyncio.create_task(run_queue_processor())
 
@@ -232,6 +267,9 @@ async def run_queue_processor():
         print("Queue processor started")
 
         while True:
+            # Clean up old audio files
+            cleanup_old_audio_files()
+
             next_item = await get_next_from_queue()
 
             if next_item:
@@ -277,6 +315,9 @@ async def main_async():
     try:
         # Initialize the database
         init_db()
+
+        # Clean up any in-progress queue items
+        cleanup_queue()
 
         # Make sure directories exist
         os.makedirs("voices/input", exist_ok=True)

@@ -21,14 +21,27 @@ def serve_static(filename):
     return send_from_directory('static', filename)
 
 
+# Add dedicated route for audio files
+@app.route('/voices/output/<path:filename>')
+def serve_audio(filename):
+    return send_from_directory('voices/output', filename)
+
+
 @app.route('/delete_audio', methods=['POST'])
 def delete_audio():
     data = request.json
     file_path = data.get('file')
+    print(f"Attempting to delete file: {file_path}")
     if file_path and os.path.exists(file_path):
-        os.remove(file_path)
-        return jsonify({"status": "success", "message": f"Deleted {file_path}"})
-    return jsonify({"status": "error", "message": "File not found"}), 404
+        try:
+            os.remove(file_path)
+            print(f"Successfully deleted: {file_path}")
+            return jsonify({"status": "success", "message": f"Deleted {file_path}"})
+        except Exception as e:
+            print(f"Error deleting file {file_path}: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 500
+    print(f"File not found or already deleted: {file_path}")
+    return jsonify({"status": "success", "message": "File already deleted or not found"})
 
 
 # Handle playback finished notification
