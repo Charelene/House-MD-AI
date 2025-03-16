@@ -1,4 +1,4 @@
-import requests, os, asyncio, re, torch, json, sqlite3, random, ssl, time
+import requests, os, asyncio, re, torch, json, sqlite3, random, ssl, time, shutil
 from ollama import AsyncClient
 from TTS.api import TTS
 from dotenv import load_dotenv
@@ -48,7 +48,9 @@ async def add_to_queue(prompt, user_requested=False):
     cursor = conn.cursor()
     cursor.execute('INSERT INTO queue (prompt, user_requested, in_progress) VALUES (?, ?, 0)', (prompt, user_requested))
     conn.commit()
+    queue_id = cursor.lastrowid  # Get the ID of the inserted item
     conn.close()
+    return queue_id
 
 
 async def get_next_from_queue():
@@ -76,10 +78,8 @@ async def generate_ai_response(prompt):
     model = 'dolphin-mistral:7b'
     message = [
         {'role': 'system', 'content': """
-            Generate a dialogue between House and Wilson in a single line format.
-            Minimum 10 lines
-            Example: "HOUSE: Insult. WILSON: Retort."
-            Always include swear words, and keep the exchange combative and humorous.
+            Generate a dialogue between house and wilson in single line; swear words must be included, they both insult each other in every reply. the topic of discussion is the user's prompt
+            Minimum 10 lines from characters
             The topic of discussion is the user's prompt.
         """},
         {'role': 'user', 'content': prompt}
@@ -128,18 +128,18 @@ def format_dialogue_for_tts(ai_output):
     return formatted_dialogue
 
 
-async def generate_tts_audio(batch):
+async def generate_tts_audio(batch, dialogue_id):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     try:
         tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
 
-        # Make sure output directory exists
-        os.makedirs("voices/output", exist_ok=True)
+        # Create a dedicated folder for this dialogue
+        dialogue_dir = f"voices/dialogue_{dialogue_id}"
+        os.makedirs(dialogue_dir, exist_ok=True)
 
         for item in batch:
-            # Fix the filename typo (from "haus.wav" to "house.wav")
             speaker_wav = "voices/input/house.wav" if item["character"] == "HOUSE" else "voices/input/wilson.wav"
-            output_file = f"voices/output/{item['character'].lower()}_{item['position']}.wav"
+            output_file = f"{dialogue_dir}/{item['character'].lower()}_{item['position']}.wav"
 
             # Ensure the input voice file exists
             if not os.path.exists(speaker_wav):
@@ -149,25 +149,42 @@ async def generate_tts_audio(batch):
             tts.tts_to_file(text=item["voice_line"], speaker_wav=speaker_wav, language="en", file_path=output_file)
             print(f"Generated audio file: {output_file}")
 
-        print("TTS generation complete.")
+        # Create a metadata.json file with the dialogue info
+        with open(f"{dialogue_dir}/metadata.json", 'w') as f:
+            json.dump({
+                "dialogue_id": dialogue_id,
+                "created_at": time.time(),
+                "dialogue": batch
+            }, f)
+
+        print(f"TTS generation complete for dialogue {dialogue_id}")
+        return dialogue_dir
     except Exception as e:
         print(f"Error generating TTS audio: {e}")
+        return None
 
 
-def update_webpage_dialogue(dialogue_data):
+def update_webpage_dialogue(dialogue_data, dialogue_id):
     try:
-        requests.post('http://127.0.0.1:1204/update_dialogue', json={'dialogue': dialogue_data})
-        print("Dialogue data sent to web interface")
+        # Update with the dialogue ID
+        for item in dialogue_data:
+            item['dialogue_id'] = dialogue_id
+
+        requests.post('http://127.0.0.1:1204/update_dialogue',
+                      json={'dialogue': dialogue_data, 'dialogue_id': dialogue_id})
+        print(f"Dialogue data sent to web interface for dialogue {dialogue_id}")
     except Exception as e:
         print(f"Error updating dialogue: {e}")
 
 
-def update_webpage_state(generated_topic=None, current_topic=None):
+def update_webpage_state(generated_topic=None, current_topic=None, dialogue_id=None):
     data = {}
     if generated_topic is not None:
         data['generatedTopic'] = generated_topic
     if current_topic is not None:
         data['currentTopic'] = current_topic
+    if dialogue_id is not None:
+        data['dialogue_id'] = dialogue_id
 
     try:
         requests.post('http://127.0.0.1:1204/update', json=data)
@@ -176,22 +193,38 @@ def update_webpage_state(generated_topic=None, current_topic=None):
         print(f"Error updating web interface state: {e}")
 
 
-def cleanup_old_audio_files():
-    """Clean up audio files that are older than 1 hour"""
-    output_dir = "voices/output"
-    if not os.path.exists(output_dir):
+def cleanup_old_dialogue_folders():
+    """Clean up dialogue folders that are older than 6 hours"""
+    voices_dir = "voices"
+    if not os.path.exists(voices_dir):
         return
 
-    for filename in os.listdir(output_dir):
-        file_path = os.path.join(output_dir, filename)
-        if os.path.isfile(file_path):
-            # Remove files older than 1 hour
-            if time.time() - os.path.getmtime(file_path) > 3600:
-                try:
-                    os.remove(file_path)
-                    print(f"Cleaned up old file: {file_path}")
-                except Exception as e:
-                    print(f"Error deleting old file {file_path}: {e}")
+    current_time = time.time()
+    for item in os.listdir(voices_dir):
+        if item.startswith("dialogue_"):
+            folder_path = os.path.join(voices_dir, item)
+            if os.path.isdir(folder_path):
+                # Check metadata file for creation time
+                metadata_file = os.path.join(folder_path, "metadata.json")
+                if os.path.exists(metadata_file):
+                    try:
+                        with open(metadata_file, 'r') as f:
+                            metadata = json.load(f)
+                            created_at = metadata.get('created_at', 0)
+                            if current_time - created_at > 21600:  # 6 hours
+                                shutil.rmtree(folder_path)
+                                print(f"Cleaned up old dialogue folder: {folder_path}")
+                    except Exception as e:
+                        print(f"Error reading metadata for {folder_path}: {e}")
+                        # If metadata is corrupt, check folder modification time
+                        if current_time - os.path.getmtime(folder_path) > 21600:
+                            shutil.rmtree(folder_path)
+                            print(f"Cleaned up old dialogue folder based on mtime: {folder_path}")
+                else:
+                    # No metadata file, check folder modification time
+                    if current_time - os.path.getmtime(folder_path) > 21600:
+                        shutil.rmtree(folder_path)
+                        print(f"Cleaned up old dialogue folder: {folder_path}")
 
 
 class TwitchBot(commands.Bot):
@@ -235,14 +268,21 @@ class TwitchBot(commands.Bot):
     async def suggest(self, ctx: commands.Context):
         prompt = ctx.message.content[len('!suggest '):].strip()
         if prompt:
-            await add_to_queue(prompt, user_requested=True)
-            await ctx.send(f'Added suggestion: "{prompt}" to the queue.')
+            queue_id = await add_to_queue(prompt, user_requested=True)
+            await ctx.send(f'Added suggestion: "{prompt}" to the queue (ID: {queue_id}).')
         else:
             await ctx.send('Usage: !suggest <prompt>')
 
 
+# Global variable to track if a dialogue is currently playing
+dialogue_playing = False
+
+
 async def run_queue_processor():
     try:
+        global dialogue_playing
+        dialogue_playing = False
+
         # List of default prompts to choose from randomly
         default_prompts = [
             "House's opinion on modern medicine",
@@ -266,9 +306,22 @@ async def run_queue_processor():
 
         print("Queue processor started")
 
+        # Run cleanup once at startup
+        cleanup_old_dialogue_folders()
+        last_cleanup_time = time.time()
+
         while True:
-            # Clean up old audio files
-            cleanup_old_audio_files()
+            # Run cleanup every hour
+            current_time = time.time()
+            if current_time - last_cleanup_time > 3600:  # 1 hour
+                cleanup_old_dialogue_folders()
+                last_cleanup_time = current_time
+
+            # If a dialogue is playing, wait before processing the next item
+            if dialogue_playing:
+                print("A dialogue is currently playing, waiting...")
+                await asyncio.sleep(5)
+                continue
 
             next_item = await get_next_from_queue()
 
@@ -283,20 +336,29 @@ async def run_queue_processor():
                 ai_output = await generate_ai_response(prompt)
                 formatted_dialogue = format_dialogue_for_tts(ai_output)
 
-                # Generate TTS audio
-                await generate_tts_audio(formatted_dialogue)
+                # Generate TTS audio in a dedicated folder
+                dialogue_dir = await generate_tts_audio(formatted_dialogue, item_id)
 
-                # Update dialogue.js for the webpage
-                update_webpage_dialogue(formatted_dialogue)
+                if dialogue_dir:
+                    # Set global flag that a dialogue is playing
+                    dialogue_playing = True
 
-                # Update webpage state to show current topic
-                update_webpage_state(generated_topic="", current_topic=prompt)
+                    # Update dialogue.js for the webpage
+                    update_webpage_dialogue(formatted_dialogue, item_id)
 
-                # Remove the item from the queue
-                await remove_from_queue(item_id)
+                    # Update webpage state to show current topic and dialogue ID
+                    update_webpage_state(generated_topic="", current_topic=prompt, dialogue_id=item_id)
 
-                # Wait for playback to finish (the webpage will notify us)
-                # For now, we'll just continue processing the queue
+                    # Remove the item from the queue
+                    await remove_from_queue(item_id)
+                else:
+                    print(f"Failed to generate TTS for dialogue {item_id}")
+                    # Reset the in_progress flag for this item
+                    conn = sqlite3.connect('queue.db')
+                    cursor = conn.cursor()
+                    cursor.execute('UPDATE queue SET in_progress = 0 WHERE id = ?', (item_id,))
+                    conn.commit()
+                    conn.close()
             else:
                 # No items in queue, add a random default prompt
                 print("Queue is empty, adding a random default prompt")
@@ -311,6 +373,13 @@ async def run_queue_processor():
         asyncio.create_task(run_queue_processor())
 
 
+# Function to handle playback finished notification
+async def handle_playback_finished():
+    global dialogue_playing
+    dialogue_playing = False
+    print("Received playback finished notification, ready for next dialogue")
+
+
 async def main_async():
     try:
         # Initialize the database
@@ -321,7 +390,6 @@ async def main_async():
 
         # Make sure directories exist
         os.makedirs("voices/input", exist_ok=True)
-        os.makedirs("voices/output", exist_ok=True)
         os.makedirs("static", exist_ok=True)
 
         # Start the queue processor
